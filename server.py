@@ -10,7 +10,6 @@ from functools import wraps
 
 from flask import Flask, render_template, request, redirect, url_for, session, jsonify, send_from_directory, Response
 from werkzeug.utils import secure_filename
-from PIL import Image
 
 import db
 
@@ -226,6 +225,11 @@ def slugify(text):
 # ==========================================
 def process_and_save_image(file, slug):
     """Validate, optimize (resize and compress), convert to WebP format, and write to uploads/."""
+    try:
+        from PIL import Image
+    except ImportError:
+        return None, "Image processing dependency is not installed. Please verify Pillow is installed in the deployment."
+
     filename = secure_filename(file.filename)
     ext = os.path.splitext(filename)[1].lower()
     
@@ -291,18 +295,26 @@ def add_cors_headers(response):
 @app.route('/')
 def home():
     """Render Riko website, dynamics loaded from database."""
-    data = db.get_all(
-        collection_name='menu_items',
-        sort_col='id',
-        sort_dir='ASC',
-        page=1,
-        per_page=200,
-        status_filter='Published'
-    )
+    try:
+        data = db.get_all(
+            collection_name='menu_items',
+            sort_col='id',
+            sort_dir='ASC',
+            page=1,
+            per_page=200,
+            status_filter='Published'
+        )
+        menu_items = data['items']
+    except Exception as exc:
+        print(f"Homepage menu load failed, using bundled seed data: {exc}")
+        menu_items = []
+        if os.path.exists(db.SEED_FILE):
+            with open(db.SEED_FILE, 'r', encoding='utf-8') as f:
+                menu_items = [item for item in json.load(f) if item.get('status', 'Published') == 'Published']
 
     # Build category buckets
     items_by_category = {cat: [] for cat in CATEGORIES}
-    for item in data['items']:
+    for item in menu_items:
         cat = item['category']
         if cat in items_by_category:
             items_by_category[cat].append(item)
