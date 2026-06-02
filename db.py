@@ -14,6 +14,18 @@ DB_FILE = os.path.join('/tmp', 'riko.db') if os.environ.get('VERCEL') else BUNDL
 SCHEMA_FILE = os.path.join(BASE_DIR, 'schema.json')
 SEED_FILE = os.path.join(BASE_DIR, 'menu_items_seed.json')
 
+RESERVATION_FIELDS = {
+    'name': 'TEXT NOT NULL DEFAULT ""',
+    'phone': 'TEXT NOT NULL DEFAULT ""',
+    'guests': 'INTEGER NOT NULL DEFAULT 1',
+    'date': 'TEXT NOT NULL DEFAULT ""',
+    'time': 'TEXT NOT NULL DEFAULT ""',
+    'special_request': 'TEXT',
+    'status': 'TEXT NOT NULL DEFAULT "New"',
+    'is_read': 'INTEGER NOT NULL DEFAULT 0',
+    'created_at': 'TEXT NOT NULL DEFAULT ""',
+}
+
 if os.environ.get('VERCEL') and not os.path.exists(DB_FILE) and os.path.exists(BUNDLED_DB_FILE):
     shutil.copyfile(BUNDLED_DB_FILE, DB_FILE)
 
@@ -138,6 +150,38 @@ def _normalize_reservation(item):
     return item
 
 
+def ensure_reservation_schema():
+    """Guarantee the reservation backend tables exist before reads and writes."""
+    if use_supabase():
+        return
+
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS reservations (
+            id INTEGER PRIMARY KEY AUTOINCREMENT
+        );
+    """)
+    cursor.execute("PRAGMA table_info(reservations)")
+    existing_cols = {row['name'] for row in cursor.fetchall()}
+    for name, sql_type in RESERVATION_FIELDS.items():
+        if name not in existing_cols:
+            cursor.execute(f"ALTER TABLE reservations ADD COLUMN {name} {sql_type}")
+
+    cursor.execute("""
+        CREATE TABLE IF NOT EXISTS reservation_logs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            reservation_id INTEGER NOT NULL,
+            action_type TEXT NOT NULL,
+            prev_status TEXT,
+            new_status TEXT NOT NULL,
+            timestamp TEXT NOT NULL
+        );
+    """)
+    conn.commit()
+    conn.close()
+
+
 def _count_from_headers(headers, fallback_count):
     content_range = headers.get('Content-Range')
     if content_range and '/' in content_range:
@@ -196,6 +240,7 @@ def init_db():
 
     conn.commit()
     conn.close()
+    ensure_reservation_schema()
     seed_if_empty()
 
 
@@ -356,6 +401,9 @@ def get_by_id(collection_name, item_id):
             return None
         return _normalize_reservation(rows[0]) if collection_name == 'reservations' else _normalize_item(rows[0])
 
+    if collection_name == 'reservations':
+        ensure_reservation_schema()
+
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute(f"SELECT * FROM {collection_name} WHERE id = ?", (item_id,))
@@ -401,10 +449,14 @@ def insert_item(collection_name, data):
     if use_supabase():
         try:
             rows, _ = _supabase_request('POST', collection_name, payload=data, prefer='return=representation')
-            item = _normalize_item(rows[0]) if rows else None
+            normalizer = _normalize_reservation if collection_name == 'reservations' else _normalize_item
+            item = normalizer(rows[0]) if rows else None
             return (item.get('id') if item else None), None
         except RuntimeError as exc:
             return None, str(exc)
+
+    if collection_name == 'reservations':
+        ensure_reservation_schema()
 
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -427,6 +479,32 @@ def insert_item(collection_name, data):
     except sqlite3.IntegrityError as e:
         conn.close()
         return None, str(e)
+
+
+def create_reservation(data):
+    """Persist a reservation and return the saved, normalized record."""
+    normalized = _normalize_reservation(dict(data))
+
+    if use_supabase():
+        rows, _ = _supabase_request(
+            'POST',
+            'reservations',
+            payload=normalized,
+            prefer='return=representation'
+        )
+        if not rows:
+            raise RuntimeError("Supabase did not return the created reservation.")
+        return _normalize_reservation(rows[0])
+
+    ensure_reservation_schema()
+    last_id, err = insert_item('reservations', normalized)
+    if err:
+        raise RuntimeError(err)
+
+    saved = get_by_id('reservations', last_id)
+    if not saved:
+        raise RuntimeError("Reservation was inserted but could not be read back.")
+    return _normalize_reservation(saved)
 
 
 def update_item(collection_name, item_id, data):
@@ -519,6 +597,7 @@ def insert_reservation_log(reservation_id, action_type, prev_status, new_status)
         })
         return True
 
+    ensure_reservation_schema()
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -536,6 +615,7 @@ def get_reservation_logs(reservation_id):
         rows, _ = _supabase_request('GET', 'reservation_logs', query)
         return rows or []
 
+    ensure_reservation_schema()
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -562,6 +642,7 @@ def get_recent_reservation_logs(limit=10):
             logs.append(row)
         return logs
 
+    ensure_reservation_schema()
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -587,6 +668,7 @@ def get_reservation_counters():
                 counts[status] += 1
         return counts
 
+    ensure_reservation_schema()
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -617,6 +699,7 @@ def check_duplicate_reservation(phone, date, time):
         rows, _ = _supabase_request('GET', 'reservations', query)
         return bool(rows)
 
+    ensure_reservation_schema()
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("""
@@ -633,6 +716,7 @@ def mark_reservation_read(item_id, is_read=1):
         _supabase_request('PATCH', 'reservations', f"id=eq.{int(item_id)}", payload={'is_read': int(is_read)})
         return True
 
+    ensure_reservation_schema()
     conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute("UPDATE reservations SET is_read = ? WHERE id = ?", (is_read, item_id))
@@ -682,6 +766,7 @@ def get_reservations_filtered(search_query=None, status_filter=None, date_filter
             "total_pages": (total_items + per_page - 1) // per_page if total_items > 0 else 1
         }
 
+    ensure_reservation_schema()
     conn = get_db_connection()
     cursor = conn.cursor()
 

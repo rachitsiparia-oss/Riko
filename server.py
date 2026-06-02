@@ -878,7 +878,7 @@ def api_create_reservation():
     }
 
     try:
-        last_id, db_err = db.insert_item("reservations", res_data)
+        saved_reservation = db.create_reservation(res_data)
     except Exception as exc:
         print(f"Reservation insert failed: {exc}")
         return jsonify({
@@ -887,10 +887,7 @@ def api_create_reservation():
             "details": str(exc)
         }), 500
 
-    if db_err:
-        return jsonify({"success": False, "error": f"Database insertion failed: {db_err}", "details": db_err}), 500
-
-    res_data["id"] = last_id
+    last_id = saved_reservation["id"]
 
     # Create history log entry
     try:
@@ -901,11 +898,11 @@ def api_create_reservation():
     # Broadcast to SSE announcer
     announcer.announce(json.dumps({
         "type": "new_reservation",
-        "item": res_data
+        "item": saved_reservation
     }))
 
     record_reservation_submission(ip)
-    return jsonify({"success": True, "item": res_data}), 201
+    return jsonify({"success": True, "item": saved_reservation}), 201
 
 @app.route('/api/reservations', methods=['GET'])
 @admin_required
