@@ -22,6 +22,18 @@ def use_supabase():
     return bool(os.environ.get('SUPABASE_URL') and os.environ.get('SUPABASE_SERVICE_ROLE_KEY'))
 
 
+def _supabase_rest_base_url():
+    configured_url = os.environ['SUPABASE_URL'].strip()
+    parsed = urllib.parse.urlsplit(configured_url)
+    base_without_query = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, '', '')).rstrip('/')
+
+    if base_without_query.endswith('/rest/v1'):
+        return base_without_query
+    if '/rest/v1/' in base_without_query:
+        return base_without_query.split('/rest/v1/', 1)[0].rstrip('/') + '/rest/v1'
+    return f"{base_without_query}/rest/v1"
+
+
 def get_db_connection():
     if use_supabase():
         raise RuntimeError("Direct SQLite connections are disabled when Supabase is configured.")
@@ -32,8 +44,7 @@ def get_db_connection():
 
 
 def _supabase_url(table_name, query=''):
-    base_url = os.environ['SUPABASE_URL'].rstrip('/')
-    url = f"{base_url}/rest/v1/{table_name}"
+    url = f"{_supabase_rest_base_url()}/{table_name}"
     if query:
         url = f"{url}?{query}"
     return url
