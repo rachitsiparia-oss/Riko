@@ -210,6 +210,9 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const res = await fetch('/api/reservations/counters');
             const data = await res.json();
+            if (!res.ok || data.success === false) {
+                throw new Error(data.details || data.error || "Failed to load operations counters.");
+            }
             if (data.success) {
                 state.counters = data.counters;
                 updateSidebarBadge();
@@ -408,6 +411,9 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const res = await fetch(url);
             const data = await res.json();
+            if (!res.ok || data.success === false) {
+                throw new Error(data.details || data.error || "Failed to sync reservation records.");
+            }
 
             // Simple deep comparison to check if items changed before rendering
             const prevSerialized = JSON.stringify(state.reservations.map(r => ({ id: r.id, status: r.status, is_read: r.is_read })));
@@ -443,6 +449,9 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const res = await fetch(url);
             const data = await res.json();
+            if (!res.ok || data.success === false) {
+                throw new Error(data.details || data.error || "Failed to sync reservation records.");
+            }
 
             state.reservations = data.items;
             state.totalItems = data.total_items;
@@ -451,7 +460,9 @@ document.addEventListener('DOMContentLoaded', () => {
             updateInboxPaginationUI(data);
             updateInboxCountersUI();
         } catch (e) {
-            bodyContainer.innerHTML = '<div class="text-center" style="padding: 40px; color: var(--text-muted);">Failed to sync reservation records.</div>';
+            const message = escapeHtml(e.message || "Failed to sync reservation records.");
+            bodyContainer.innerHTML = `<div class="text-center" style="padding: 40px; color: var(--text-muted);">${message}</div>`;
+            showToast(message, "error");
         }
     }
 
@@ -459,6 +470,9 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const res = await fetch('/api/reservations/counters');
             const data = await res.json();
+            if (!res.ok || data.success === false) {
+                throw new Error(data.details || data.error || "Failed to load inbox counters.");
+            }
             if (data.success) {
                 state.counters = data.counters;
                 updateInboxCountersUI();
@@ -590,6 +604,9 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const res = await fetch(`/api/reservations/${id}`);
             const data = await res.json();
+            if (!res.ok || data.success === false) {
+                throw new Error(data.details || data.error || "Failed to fetch reservation details.");
+            }
             if (data.success) {
                 renderReservationDetails(data.item);
                 detailsContainer.style.opacity = '1';
@@ -607,7 +624,7 @@ document.addEventListener('DOMContentLoaded', () => {
                 showToast("Failed to fetch reservation details", "error");
             }
         } catch (e) {
-            showToast("Connection to server failed.", "error");
+            showToast(e.message || "Connection to server failed.", "error");
         }
     }
 
@@ -644,6 +661,9 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const res = await fetch(`/api/reservations/${item.id}/logs`);
             const logData = await res.json();
+            if (!res.ok || logData.success === false) {
+                throw new Error(logData.details || logData.error || "Timeline logs query failed.");
+            }
             if (logData.success && logData.logs) {
                 renderTimelineLogs(logData.logs);
             }

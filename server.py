@@ -9,6 +9,7 @@ import queue
 from functools import wraps
 
 from flask import Flask, render_template, request, redirect, url_for, session, jsonify, send_from_directory, Response
+from werkzeug.exceptions import HTTPException
 from werkzeug.utils import secure_filename
 
 import db
@@ -162,6 +163,82 @@ def sanitize_input(val):
         cleaned = val.strip()
         return html.escape(cleaned)
     return val
+
+def wants_api_json():
+    return request.path.startswith('/api/')
+
+@app.errorhandler(HTTPException)
+def handle_http_exception(exc):
+    if wants_api_json():
+        return jsonify({
+            "success": False,
+            "error": exc.name,
+            "details": exc.description
+        }), exc.code
+    return exc
+
+@app.errorhandler(Exception)
+def handle_unexpected_exception(exc):
+    print(f"Unhandled application error on {request.path}: {exc}")
+    if wants_api_json():
+        return jsonify({
+            "success": False,
+            "error": "Internal server error.",
+            "details": str(exc)
+        }), 500
+    raise exc
+
+def get_request_data():
+    return request.get_json(silent=True) or request.form or {}
+
+def load_seed_menu_collection(search_query=None, sort_col='id', sort_dir='ASC', page=1, per_page=10, category_filter=None, status_filter=None):
+    if not os.path.exists(db.SEED_FILE):
+        raise RuntimeError(f"Seed file not found: {db.SEED_FILE}")
+
+    with open(db.SEED_FILE, 'r', encoding='utf-8') as f:
+        items = json.load(f)
+
+    normalized = []
+    for index, item in enumerate(items, start=1):
+        row = dict(item)
+        row.setdefault('id', index)
+        row.setdefault('status', 'Published')
+        normalized.append(row)
+
+    if search_query:
+        needle = search_query.lower()
+        normalized = [
+            item for item in normalized
+            if needle in str(item.get('name', '')).lower()
+            or needle in str(item.get('description', '')).lower()
+            or needle in str(item.get('category', '')).lower()
+            or needle in str(item.get('status', '')).lower()
+        ]
+
+    if category_filter:
+        normalized = [item for item in normalized if item.get('category') == category_filter]
+    if status_filter:
+        normalized = [item for item in normalized if item.get('status') == status_filter]
+
+    allowed_sort_cols = {'id', 'name', 'slug', 'description', 'price', 'category', 'status'}
+    sort_key = sort_col if sort_col in allowed_sort_cols else 'id'
+    reverse = str(sort_dir).upper() == 'DESC'
+    normalized.sort(key=lambda item: item.get(sort_key) if item.get(sort_key) is not None else '', reverse=reverse)
+
+    total_items = len(normalized)
+    page = max(int(page), 1)
+    per_page = max(int(per_page), 1)
+    start = (page - 1) * per_page
+    paged = normalized[start:start + per_page]
+
+    return {
+        "items": paged,
+        "total_items": total_items,
+        "page": page,
+        "per_page": per_page,
+        "total_pages": (total_items + per_page - 1) // per_page if total_items > 0 else 1,
+        "warning": "Loaded bundled menu seed because the configured database query failed."
+    }
 
 def validate_menu_item(form_data, has_file, is_update=False):
     """Server-side validation for menu items fields."""
@@ -417,23 +494,83 @@ def api_get_collection(collection_name):
     if collection_name not in schemas:
         return jsonify({"success": False, "error": f"Collection '{collection_name}' not found."}), 404
 
-    data = db.get_all(
-        collection_name=collection_name,
-        search_query=search,
-        sort_col=sort_col,
-        sort_dir=sort_dir,
-        page=page,
-        per_page=per_page,
-        category_filter=category if category else None,
-        status_filter=status if status else None
-    )
+    try:
+        data = db.get_all(
+            collection_name=collection_name,
+            search_query=search,
+            sort_col=sort_col,
+            sort_dir=sort_dir,
+            page=page,
+            per_page=per_page,
+            category_filter=category if category else None,
+            status_filter=status if status else None
+        )
+    except Exception as exc:
+        print(f"Collection fetch failed for {collection_name}: {exc}")
+        if collection_name == 'menu_items':
+            try:
+                fallback_data = load_seed_menu_collection(
+                    search_query=search,
+                    sort_col=sort_col,
+                    sort_dir=sort_dir,
+                    page=page,
+                    per_page=per_page,
+                    category_filter=category if category else None,
+                    status_filter=status if status else None
+                )
+                fallback_data["success"] = True
+                fallback_data["details"] = str(exc)
+                return jsonify(fallback_data)
+            except Exception as fallback_exc:
+                print(f"Menu seed fallback failed: {fallback_exc}")
+        return jsonify({
+            "success": False,
+            "error": "Collection fetch failed. Check Supabase URL, service role key, table names, and columns.",
+            "details": str(exc)
+        }), 500
     return jsonify(data)
+
+@app.route('/api/health/database', methods=['GET'])
+@admin_required
+def api_database_health():
+    """Report database wiring status without exposing credentials."""
+    status = {
+        "success": True,
+        "database": "supabase" if db.use_supabase() else "sqlite",
+        "env": {
+            "SUPABASE_URL": bool(os.environ.get('SUPABASE_URL')),
+            "SUPABASE_SERVICE_ROLE_KEY": bool(os.environ.get('SUPABASE_SERVICE_ROLE_KEY')),
+            "ADMIN_PASSWORD": bool(os.environ.get('ADMIN_PASSWORD')),
+            "SECRET_KEY": bool(os.environ.get('SECRET_KEY'))
+        },
+        "checks": {}
+    }
+
+    for collection_name in ["menu_items", "reservations"]:
+        try:
+            result = db.get_all(collection_name, page=1, per_page=1) if collection_name == "menu_items" else db.get_reservations_filtered(page=1, per_page=1)
+            status["checks"][collection_name] = {
+                "ok": True,
+                "total_items": result.get("total_items", 0)
+            }
+        except Exception as exc:
+            status["success"] = False
+            status["checks"][collection_name] = {
+                "ok": False,
+                "error": str(exc)
+            }
+
+    return jsonify(status), 200 if status["success"] else 500
 
 @app.route('/api/collections/<collection_name>/<int:item_id>', methods=['GET'])
 @admin_required
 def api_get_item(collection_name, item_id):
     """Fetch item record details by database identifier."""
-    item = db.get_by_id(collection_name, item_id)
+    try:
+        item = db.get_by_id(collection_name, item_id)
+    except Exception as exc:
+        print(f"Collection item fetch failed for {collection_name}/{item_id}: {exc}")
+        return jsonify({"success": False, "error": "Collection item fetch failed.", "details": str(exc)}), 500
     if not item:
         return jsonify({"success": False, "error": "Item not found."}), 404
     return jsonify({"success": True, "item": item})
@@ -574,7 +711,7 @@ def api_patch_item(collection_name, item_id):
     if not item:
         return jsonify({"success": False, "error": "Item not found."}), 404
 
-    data = request.json
+    data = get_request_data()
     if not data:
         return jsonify({"success": False, "error": "No data provided."}), 400
 
@@ -621,7 +758,7 @@ def api_delete_item(collection_name, item_id):
 @admin_required
 def api_bulk_action(collection_name):
     """Apply operations (Publish, Draft, Delete) on multiple items simultaneously."""
-    data = request.json
+    data = get_request_data()
     if not data or 'ids' not in data or 'action' not in data:
         return jsonify({"success": False, "error": "Missing ids or action parameters."}), 400
 
@@ -669,8 +806,10 @@ def is_rate_limited(ip):
         last_submission = reservation_rate_limits[ip]
         if now - last_submission < 30:
             return True
-    reservation_rate_limits[ip] = now
     return False
+
+def record_reservation_submission(ip):
+    reservation_rate_limits[ip] = time.time()
 
 @app.route('/api/reservations', methods=['POST'])
 def api_create_reservation():
@@ -680,9 +819,7 @@ def api_create_reservation():
         return jsonify({"success": False, "error": "Rate limit exceeded. Please wait 30 seconds before submitting another booking proposal."}), 429
 
     # Try JSON body, fallback to URL-encoded form data
-    data = request.json
-    if not data:
-        data = request.form
+    data = get_request_data()
         
     if not data:
         return jsonify({"success": False, "error": "No reservation details provided."}), 400
@@ -716,8 +853,16 @@ def api_create_reservation():
         return jsonify({"success": False, "error": "Validation failed.", "fields": errors}), 400
 
     # Duplicate checking
-    if db.check_duplicate_reservation(phone, date, time_val):
-        return jsonify({"success": False, "error": "A booking proposal for this phone and date/time already exists. To make modifications, please contact the restaurant coordinates directly."}), 400
+    try:
+        if db.check_duplicate_reservation(phone, date, time_val):
+            return jsonify({"success": False, "error": "A booking proposal for this phone and date/time already exists. To make modifications, please contact the restaurant coordinates directly."}), 400
+    except Exception as exc:
+        print(f"Reservation duplicate check failed: {exc}")
+        return jsonify({
+            "success": False,
+            "error": "Reservation database check failed. Please try again shortly.",
+            "details": str(exc)
+        }), 500
 
     created_at = datetime.datetime.now().isoformat()
     res_data = {
@@ -732,14 +877,26 @@ def api_create_reservation():
         "created_at": created_at
     }
 
-    last_id, db_err = db.insert_item("reservations", res_data)
+    try:
+        last_id, db_err = db.insert_item("reservations", res_data)
+    except Exception as exc:
+        print(f"Reservation insert failed: {exc}")
+        return jsonify({
+            "success": False,
+            "error": "Reservation database insertion failed.",
+            "details": str(exc)
+        }), 500
+
     if db_err:
-        return jsonify({"success": False, "error": f"Database insertion failed: {db_err}"}), 500
+        return jsonify({"success": False, "error": f"Database insertion failed: {db_err}", "details": db_err}), 500
 
     res_data["id"] = last_id
 
     # Create history log entry
-    db.insert_reservation_log(last_id, "Create", None, "New")
+    try:
+        db.insert_reservation_log(last_id, "Create", None, "New")
+    except Exception as exc:
+        print(f"Reservation log insert failed for reservation {last_id}: {exc}")
 
     # Broadcast to SSE announcer
     announcer.announce(json.dumps({
@@ -747,6 +904,7 @@ def api_create_reservation():
         "item": res_data
     }))
 
+    record_reservation_submission(ip)
     return jsonify({"success": True, "item": res_data}), 201
 
 @app.route('/api/reservations', methods=['GET'])
@@ -766,27 +924,43 @@ def api_get_reservations():
         page = 1
         per_page = 10
 
-    data = db.get_reservations_filtered(
-        search_query=search if search else None,
-        status_filter=status if status else None,
-        date_filter=date_filter if date_filter else None,
-        start_date=start_date if start_date else None,
-        end_date=end_date if end_date else None,
-        page=page,
-        per_page=per_page
-    )
+    try:
+        data = db.get_reservations_filtered(
+            search_query=search if search else None,
+            status_filter=status if status else None,
+            date_filter=date_filter if date_filter else None,
+            start_date=start_date if start_date else None,
+            end_date=end_date if end_date else None,
+            page=page,
+            per_page=per_page
+        )
+    except Exception as exc:
+        print(f"Reservation inbox fetch failed: {exc}")
+        return jsonify({
+            "success": False,
+            "error": "Reservation inbox fetch failed. Check Supabase URL, service role key, table names, and columns.",
+            "details": str(exc)
+        }), 500
     return jsonify(data)
 
 @app.route('/api/reservations/<int:res_id>', methods=['GET'])
 @admin_required
 def api_get_reservation_detail(res_id):
     """Retrieve detailed reservation. Marks the item as read automatically."""
-    res = db.get_by_id("reservations", res_id)
+    try:
+        res = db.get_by_id("reservations", res_id)
+    except Exception as exc:
+        print(f"Reservation detail fetch failed for {res_id}: {exc}")
+        return jsonify({"success": False, "error": "Reservation detail fetch failed.", "details": str(exc)}), 500
     if not res:
         return jsonify({"success": False, "error": "Reservation not found."}), 404
         
     if res['is_read'] == 0:
-        db.mark_reservation_read(res_id, 1)
+        try:
+            db.mark_reservation_read(res_id, 1)
+        except Exception as exc:
+            print(f"Reservation read-state update failed for {res_id}: {exc}")
+            return jsonify({"success": False, "error": "Reservation read-state update failed.", "details": str(exc)}), 500
         res['is_read'] = 1
         
         # Broadcast that the reservation was read
@@ -801,11 +975,15 @@ def api_get_reservation_detail(res_id):
 @admin_required
 def api_update_reservation(res_id):
     """Update reservation status or read-state, saving status log details."""
-    res = db.get_by_id("reservations", res_id)
+    try:
+        res = db.get_by_id("reservations", res_id)
+    except Exception as exc:
+        print(f"Reservation status fetch failed for {res_id}: {exc}")
+        return jsonify({"success": False, "error": "Reservation status fetch failed.", "details": str(exc)}), 500
     if not res:
         return jsonify({"success": False, "error": "Reservation not found."}), 404
 
-    data = request.json or {}
+    data = get_request_data()
     update_data = {}
     
     if 'status' in data:
@@ -816,7 +994,10 @@ def api_update_reservation(res_id):
         prev_status = res['status']
         if prev_status != new_status:
             update_data['status'] = new_status
-            db.insert_reservation_log(res_id, "Status Update", prev_status, new_status)
+            try:
+                db.insert_reservation_log(res_id, "Status Update", prev_status, new_status)
+            except Exception as exc:
+                print(f"Reservation status log insert failed for {res_id}: {exc}")
 
     if 'is_read' in data:
         update_data['is_read'] = int(data['is_read'])
@@ -828,7 +1009,11 @@ def api_update_reservation(res_id):
     if not ok:
         return jsonify({"success": False, "error": db_err}), 500
 
-    updated_res = db.get_by_id("reservations", res_id)
+    try:
+        updated_res = db.get_by_id("reservations", res_id)
+    except Exception as exc:
+        print(f"Reservation refresh failed after update for {res_id}: {exc}")
+        return jsonify({"success": False, "error": "Reservation update saved, but refresh failed.", "details": str(exc)}), 500
     
     # Broadcast to SSE announcer
     announcer.announce(json.dumps({
@@ -842,11 +1027,19 @@ def api_update_reservation(res_id):
 @admin_required
 def api_delete_reservation(res_id):
     """Permanently delete a reservation from database."""
-    res = db.get_by_id("reservations", res_id)
+    try:
+        res = db.get_by_id("reservations", res_id)
+    except Exception as exc:
+        print(f"Reservation delete fetch failed for {res_id}: {exc}")
+        return jsonify({"success": False, "error": "Reservation delete fetch failed.", "details": str(exc)}), 500
     if not res:
         return jsonify({"success": False, "error": "Reservation not found."}), 404
 
-    db.delete_item("reservations", res_id)
+    try:
+        db.delete_item("reservations", res_id)
+    except Exception as exc:
+        print(f"Reservation delete failed for {res_id}: {exc}")
+        return jsonify({"success": False, "error": "Reservation delete failed.", "details": str(exc)}), 500
     
     # Broadcast to SSE announcer
     announcer.announce(json.dumps({
@@ -860,21 +1053,34 @@ def api_delete_reservation(res_id):
 @admin_required
 def api_get_reservation_counters():
     """Retrieve live stats counters for the dashboard."""
-    counts = db.get_reservation_counters()
+    try:
+        counts = db.get_reservation_counters()
+    except Exception as exc:
+        print(f"Reservation counter fetch failed: {exc}")
+        return jsonify({"success": False, "error": "Reservation counter fetch failed.", "details": str(exc)}), 500
     return jsonify({"success": True, "counters": counts})
 
 @app.route('/api/reservations/logs/recent', methods=['GET'])
 @admin_required
 def api_get_recent_logs():
     """Retrieve the last 10 reservation activity logs across the entire system."""
-    return jsonify({"success": True, "logs": db.get_recent_reservation_logs(10)})
+    try:
+        logs = db.get_recent_reservation_logs(10)
+    except Exception as exc:
+        print(f"Recent reservation log fetch failed: {exc}")
+        return jsonify({"success": False, "error": "Recent reservation log fetch failed.", "details": str(exc)}), 500
+    return jsonify({"success": True, "logs": logs})
 
 
 @app.route('/api/reservations/<int:res_id>/logs', methods=['GET'])
 @admin_required
 def api_get_reservation_logs(res_id):
     """Retrieve audit history logs trail."""
-    logs = db.get_reservation_logs(res_id)
+    try:
+        logs = db.get_reservation_logs(res_id)
+    except Exception as exc:
+        print(f"Reservation log fetch failed for {res_id}: {exc}")
+        return jsonify({"success": False, "error": "Reservation log fetch failed.", "details": str(exc)}), 500
     return jsonify({"success": True, "logs": logs})
 
 @app.route('/api/reservations/stream')

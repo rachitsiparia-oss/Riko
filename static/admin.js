@@ -92,14 +92,26 @@ document.addEventListener('DOMContentLoaded', () => {
 
         try {
             const res = await fetch(url);
-            const data = await res.json();
+            const rawBody = await res.text();
+            let data = {};
+            try {
+                data = rawBody ? JSON.parse(rawBody) : {};
+            } catch (jsonErr) {
+                throw new Error(`Collection API returned HTTP ${res.status}: ${rawBody.slice(0, 240) || res.statusText}`);
+            }
+            if (!res.ok || data.success === false) {
+                throw new Error(data.details || data.error || "Failed to fetch collection data.");
+            }
             
             state.items = data.items;
             renderTable(data.items);
             updatePagination(data);
             resetSelection();
+            if (data.warning) {
+                showToast(`${data.warning} ${data.details || ''}`.trim(), "error");
+            }
         } catch (err) {
-            showToast("Failed to fetch collection data.", "error");
+            showToast(err.message || "Failed to fetch collection data.", "error");
         }
     }
 

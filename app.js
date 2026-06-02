@@ -446,14 +446,19 @@ function setupReservationForm() {
         submitBtn.disabled = true;
         errorBanner.style.display = 'none';
 
+        const getFieldValue = (name) => {
+            const field = form.querySelector(`[name="${name}"]`);
+            return field ? field.value.trim() : '';
+        };
+
         // Extract form data
         const payload = {
-            name: form.querySelector('[name="name"]').value.trim(),
-            phone: form.querySelector('[name="phone"]').value.trim(),
-            guests: parseInt(form.querySelector('[name="guests"]').value),
-            date: form.querySelector('[name="date"]').value,
-            time: form.querySelector('[name="time"]').value,
-            special_request: form.querySelector('[name="special_request"]').value.trim()
+            name: getFieldValue('name'),
+            phone: getFieldValue('phone'),
+            guests: parseInt(getFieldValue('guests'), 10),
+            date: getFieldValue('date'),
+            time: getFieldValue('time'),
+            special_request: getFieldValue('special_request')
         };
 
         try {
@@ -464,7 +469,13 @@ function setupReservationForm() {
                 body: JSON.stringify(payload)
             });
 
-            const data = await res.json();
+            let data = {};
+            const rawBody = await res.text();
+            try {
+                data = rawBody ? JSON.parse(rawBody) : {};
+            } catch (jsonErr) {
+                throw new Error(`Reservation server returned HTTP ${res.status}: ${rawBody.slice(0, 240) || res.statusText}`);
+            }
             if (res.ok && data.success) {
                 // Success Modal Animate
                 successOverlay.style.display = 'flex';
@@ -492,11 +503,13 @@ function setupReservationForm() {
                 setTimeout(closeSuccess, 5000);
             } else {
                 // Render validation/duplicate error
-                errorBanner.innerHTML = `<i class="fa-solid fa-circle-exclamation" style="margin-right:8px;"></i> ${data.error || "Failed to submit booking request. Please check input values."}`;
+                const message = data.details || data.error || `Reservation server returned HTTP ${res.status}.`;
+                errorBanner.innerHTML = `<i class="fa-solid fa-circle-exclamation" style="margin-right:8px;"></i> ${escapeHtml(message)}`;
                 errorBanner.style.display = 'block';
             }
         } catch (err) {
-            errorBanner.innerHTML = `<i class="fa-solid fa-triangle-exclamation" style="margin-right:8px;"></i> Unable to contact concierge server. Please coordinate reservation via phone.`;
+            const message = err.message || "Unable to contact concierge server. Please coordinate reservation via phone.";
+            errorBanner.innerHTML = `<i class="fa-solid fa-triangle-exclamation" style="margin-right:8px;"></i> ${escapeHtml(message)}`;
             errorBanner.style.display = 'block';
         } finally {
             submitBtn.textContent = originalText;

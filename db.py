@@ -39,7 +39,7 @@ def _supabase_url(table_name, query=''):
     return url
 
 
-def _supabase_headers(prefer=None):
+def _supabase_headers(prefer=None, count=None):
     key = os.environ['SUPABASE_SERVICE_ROLE_KEY']
     headers = {
         'apikey': key,
@@ -48,19 +48,22 @@ def _supabase_headers(prefer=None):
     }
     if prefer:
         headers['Prefer'] = prefer
+    if count:
+        headers['Prefer'] = f"{headers.get('Prefer')},count={count}" if headers.get('Prefer') else f"count={count}"
     return headers
 
 
-def _supabase_request(method, table_name, query='', payload=None, prefer=None):
+def _supabase_request(method, table_name, query='', payload=None, prefer=None, count=None):
     body = None
     if payload is not None:
         body = json.dumps(payload).encode('utf-8')
 
+    url = _supabase_url(table_name, query)
     request = urllib.request.Request(
-        _supabase_url(table_name, query),
+        url,
         data=body,
         method=method,
-        headers=_supabase_headers(prefer),
+        headers=_supabase_headers(prefer, count),
     )
 
     try:
@@ -74,7 +77,12 @@ def _supabase_request(method, table_name, query='', payload=None, prefer=None):
             details = json.loads(raw)
         except json.JSONDecodeError:
             details = raw
-        raise RuntimeError(f"Supabase {method} {table_name} failed: {details}") from exc
+        raise RuntimeError(f"Supabase {method} {table_name} failed with HTTP {exc.code}: {details}") from exc
+    except urllib.error.URLError as exc:
+        reason = getattr(exc, 'reason', exc)
+        raise RuntimeError(f"Supabase {method} {table_name} connection failed: {reason}") from exc
+    except TimeoutError as exc:
+        raise RuntimeError(f"Supabase {method} {table_name} timed out.") from exc
 
 
 def _quote_value(value):
@@ -239,7 +247,7 @@ def get_all(collection_name, search_query=None, sort_col=None, sort_dir="ASC", p
         if status_filter:
             params.append(f"status=eq.{_quote_value(status_filter)}")
 
-        items, headers = _supabase_request('GET', collection_name, '&'.join(params), prefer='count=exact')
+        items, headers = _supabase_request('GET', collection_name, '&'.join(params), count='exact')
         items = [_normalize_item(item) for item in (items or [])]
         total_items = _count_from_headers(headers, len(items))
         return {
@@ -511,7 +519,10 @@ def get_reservation_logs(reservation_id):
 def get_recent_reservation_logs(limit=10):
     if use_supabase():
         query = f"select=*,reservations(name)&order=timestamp.desc&limit={int(limit)}"
-        rows, _ = _supabase_request('GET', 'reservation_logs', query)
+        try:
+            rows, _ = _supabase_request('GET', 'reservation_logs', query)
+        except RuntimeError:
+            rows, _ = _supabase_request('GET', 'reservation_logs', f"select=*&order=timestamp.desc&limit={int(limit)}")
         logs = []
         for row in rows or []:
             reservation = row.pop('reservations', None)
@@ -628,7 +639,7 @@ def get_reservations_filtered(search_query=None, status_filter=None, date_filter
             if end_date:
                 params.append(f"date=lte.{_quote_value(end_date)}")
 
-        items, headers = _supabase_request('GET', 'reservations', '&'.join(params), prefer='count=exact')
+        items, headers = _supabase_request('GET', 'reservations', '&'.join(params), count='exact')
         items = [_normalize_item(item) for item in (items or [])]
         total_items = _count_from_headers(headers, len(items))
         return {
