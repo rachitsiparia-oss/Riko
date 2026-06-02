@@ -121,6 +121,23 @@ def _normalize_item(item):
     return item
 
 
+def _normalize_reservation(item):
+    item = _normalize_item(item)
+    if not isinstance(item, dict):
+        return item
+
+    item['name'] = item.get('name') or 'Guest'
+    item['phone'] = item.get('phone') or ''
+    item['guests'] = int(item.get('guests') or 1)
+    item['date'] = item.get('date') or ''
+    item['time'] = item.get('time') or ''
+    item['special_request'] = item.get('special_request') or ''
+    item['status'] = item.get('status') or 'New'
+    item['is_read'] = int(item.get('is_read') or 0)
+    item['created_at'] = item.get('created_at') or datetime.datetime.now().isoformat()
+    return item
+
+
 def _count_from_headers(headers, fallback_count):
     content_range = headers.get('Content-Range')
     if content_range and '/' in content_range:
@@ -259,7 +276,8 @@ def get_all(collection_name, search_query=None, sort_col=None, sort_dir="ASC", p
             params.append(f"status=eq.{_quote_value(status_filter)}")
 
         items, headers = _supabase_request('GET', collection_name, '&'.join(params), count='exact')
-        items = [_normalize_item(item) for item in (items or [])]
+        normalizer = _normalize_reservation if collection_name == 'reservations' else _normalize_item
+        items = [normalizer(item) for item in (items or [])]
         total_items = _count_from_headers(headers, len(items))
         return {
             "items": items,
@@ -334,7 +352,9 @@ def get_by_id(collection_name, item_id):
     if use_supabase():
         query = f"select=*&id=eq.{int(item_id)}&limit=1"
         rows, _ = _supabase_request('GET', collection_name, query)
-        return _normalize_item(rows[0]) if rows else None
+        if not rows:
+            return None
+        return _normalize_reservation(rows[0]) if collection_name == 'reservations' else _normalize_item(rows[0])
 
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -365,7 +385,8 @@ def get_items_by_ids(collection_name, item_ids, columns='*'):
     if use_supabase():
         query = f"select={urllib.parse.quote(columns, safe='*,')}&id={_build_in_filter(item_ids)}"
         rows, _ = _supabase_request('GET', collection_name, query)
-        return [_normalize_item(row) for row in (rows or [])]
+        normalizer = _normalize_reservation if collection_name == 'reservations' else _normalize_item
+        return [normalizer(row) for row in (rows or [])]
 
     conn = get_db_connection()
     cursor = conn.cursor()
@@ -651,7 +672,7 @@ def get_reservations_filtered(search_query=None, status_filter=None, date_filter
                 params.append(f"date=lte.{_quote_value(end_date)}")
 
         items, headers = _supabase_request('GET', 'reservations', '&'.join(params), count='exact')
-        items = [_normalize_item(item) for item in (items or [])]
+        items = [_normalize_reservation(item) for item in (items or [])]
         total_items = _count_from_headers(headers, len(items))
         return {
             "items": items,
@@ -713,7 +734,7 @@ def get_reservations_filtered(search_query=None, status_filter=None, date_filter
     rows = cursor.fetchall()
     conn.close()
 
-    items = [dict(r) for r in rows]
+    items = [_normalize_reservation(dict(r)) for r in rows]
     return {
         "items": items,
         "total_items": total_items,

@@ -934,6 +934,17 @@ def api_get_reservations():
             page=page,
             per_page=per_page
         )
+        if data.get("total_items", 0) == 0 and not search and status in ("", "All") and date_filter in ("", "all"):
+            direct_data = db.get_all(
+                collection_name="reservations",
+                sort_col="id",
+                sort_dir="DESC",
+                page=page,
+                per_page=per_page
+            )
+            if direct_data.get("total_items", 0) > 0:
+                data = direct_data
+                data["warning"] = "Loaded reservations through direct collection fallback."
     except Exception as exc:
         print(f"Reservation inbox fetch failed: {exc}")
         return jsonify({

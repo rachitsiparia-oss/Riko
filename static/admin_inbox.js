@@ -410,14 +410,20 @@ document.addEventListener('DOMContentLoaded', () => {
 
         try {
             const res = await fetch(url);
-            const data = await res.json();
+            const rawBody = await res.text();
+            let data = {};
+            try {
+                data = rawBody ? JSON.parse(rawBody) : {};
+            } catch (jsonErr) {
+                throw new Error(`Reservation inbox API returned HTTP ${res.status}: ${rawBody.slice(0, 240) || res.statusText}`);
+            }
             if (!res.ok || data.success === false) {
                 throw new Error(data.details || data.error || "Failed to sync reservation records.");
             }
 
             // Simple deep comparison to check if items changed before rendering
             const prevSerialized = JSON.stringify(state.reservations.map(r => ({ id: r.id, status: r.status, is_read: r.is_read })));
-            const newSerialized = JSON.stringify(data.items.map(r => ({ id: r.id, status: r.status, is_read: r.is_read })));
+            const newSerialized = JSON.stringify((data.items || []).map(r => ({ id: r.id, status: r.status, is_read: r.is_read })));
 
             if (prevSerialized !== newSerialized || data.total_items !== state.totalItems) {
                 state.reservations = data.items;
@@ -448,17 +454,26 @@ document.addEventListener('DOMContentLoaded', () => {
 
         try {
             const res = await fetch(url);
-            const data = await res.json();
+            const rawBody = await res.text();
+            let data = {};
+            try {
+                data = rawBody ? JSON.parse(rawBody) : {};
+            } catch (jsonErr) {
+                throw new Error(`Reservation inbox API returned HTTP ${res.status}: ${rawBody.slice(0, 240) || res.statusText}`);
+            }
             if (!res.ok || data.success === false) {
                 throw new Error(data.details || data.error || "Failed to sync reservation records.");
             }
 
-            state.reservations = data.items;
-            state.totalItems = data.total_items;
+            state.reservations = data.items || [];
+            state.totalItems = data.total_items || 0;
 
-            renderInboxList(data.items);
+            renderInboxList(state.reservations);
             updateInboxPaginationUI(data);
-            updateInboxCountersUI();
+            await loadInboxCountersOnly();
+            if (data.warning) {
+                showToast(data.warning, "error");
+            }
         } catch (e) {
             const message = escapeHtml(e.message || "Failed to sync reservation records.");
             bodyContainer.innerHTML = `<div class="text-center" style="padding: 40px; color: var(--text-muted);">${message}</div>`;
@@ -507,6 +522,7 @@ document.addEventListener('DOMContentLoaded', () => {
 
     function renderInboxList(items) {
         const container = document.getElementById('inboxListBody');
+        items = Array.isArray(items) ? items : [];
         if (items.length === 0) {
             container.innerHTML = `
                 <div class="text-center" style="padding: 60px 20px; color: var(--text-muted);">
