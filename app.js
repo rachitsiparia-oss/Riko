@@ -607,16 +607,6 @@ async function loadDynamicMenu() {
 }
 
 function getApiBase() {
-    if (window.RIKO_API_BASE) {
-        return String(window.RIKO_API_BASE).replace(/\/$/, '');
-    }
-
-    const { protocol, hostname, port } = window.location;
-    const isStaticPreview = protocol === 'file:' || ['5500', '5501', '8080'].includes(port);
-    if (isStaticPreview && (hostname === '' || hostname === 'localhost' || hostname === '127.0.0.1')) {
-        return 'http://127.0.0.1:5000';
-    }
-
     return '';
 }
 

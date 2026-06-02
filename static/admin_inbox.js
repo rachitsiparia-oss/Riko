@@ -568,7 +568,8 @@ document.addEventListener('DOMContentLoaded', () => {
         const rows = container.querySelectorAll('.inbox-item');
         rows.forEach(row => {
             row.addEventListener('click', () => {
-                const id = parseInt(row.getAttribute('data-id'));
+                const rawId = row.getAttribute('data-id');
+                const id = /^\d+$/.test(rawId) ? parseInt(rawId, 10) : rawId;
                 selectReservation(id);
             });
         });
@@ -600,7 +601,8 @@ document.addEventListener('DOMContentLoaded', () => {
         // Update active class state on left list row immediately
         const rows = document.querySelectorAll('.inbox-item');
         rows.forEach(r => {
-            const rowId = parseInt(r.getAttribute('data-id'));
+            const rawId = r.getAttribute('data-id');
+            const rowId = /^\d+$/.test(rawId) ? parseInt(rawId, 10) : rawId;
             if (rowId === id) {
                 r.classList.add('active');
                 r.classList.remove('unread');

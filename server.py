@@ -7,6 +7,7 @@ import html
 import datetime
 import queue
 from functools import wraps
+from urllib.parse import urlsplit
 
 from flask import Flask, render_template, request, redirect, url_for, session, jsonify, send_from_directory, Response
 from werkzeug.exceptions import HTTPException
@@ -190,6 +191,16 @@ def handle_unexpected_exception(exc):
 
 def get_request_data():
     return request.get_json(silent=True) or request.form or {}
+
+def require_supabase_reservations():
+    """Reservations are production data and must be served from Supabase."""
+    if db.use_supabase():
+        return None
+    return jsonify({
+        "success": False,
+        "error": "Supabase is not configured for reservations.",
+        "details": "Set SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY in the deployed environment. The reservation inbox reads Supabase only."
+    }), 500
 
 def load_seed_menu_collection(search_query=None, sort_col='id', sort_dir='ASC', page=1, per_page=10, category_filter=None, status_filter=None):
     if not os.path.exists(db.SEED_FILE):
@@ -448,16 +459,16 @@ def admin_logout():
 @app.route('/admin/dashboard')
 @admin_required
 def admin_dashboard():
-    """Serve Riko operations admin control panel with multiple views (Dashboard, Menu CMS, Reservations, Settings)."""
+    """Serve Riko operations admin control panel with Menu CMS and Settings views."""
     with open(db.SCHEMA_FILE, 'r', encoding='utf-8') as f:
         schemas = json.load(f)
         
     # Support view navigation parameters
     current_view = request.args.get('view', 'menu_cms')
-    if current_view not in ['dashboard', 'menu_cms', 'reservations', 'settings']:
+    if current_view not in ['menu_cms', 'settings']:
         current_view = 'menu_cms'
         
-    current_collection = 'menu_items' if current_view == 'menu_cms' else 'reservations'
+    current_collection = 'menu_items'
         
     return render_template(
         'dashboard.html',
@@ -534,9 +545,12 @@ def api_get_collection(collection_name):
 @admin_required
 def api_database_health():
     """Report database wiring status without exposing credentials."""
+    supabase_url = os.environ.get('SUPABASE_URL', '').strip()
+    supabase_host = urlsplit(supabase_url).netloc if supabase_url else None
     status = {
         "success": True,
         "database": "supabase" if db.use_supabase() else "sqlite",
+        "supabase_host": supabase_host,
         "env": {
             "SUPABASE_URL": bool(os.environ.get('SUPABASE_URL')),
             "SUPABASE_SERVICE_ROLE_KEY": bool(os.environ.get('SUPABASE_SERVICE_ROLE_KEY')),
@@ -814,6 +828,10 @@ def record_reservation_submission(ip):
 @app.route('/api/reservations', methods=['POST'])
 def api_create_reservation():
     """Submit a new reservation proposal. Rate-limited and validated."""
+    supabase_error = require_supabase_reservations()
+    if supabase_error:
+        return supabase_error
+
     ip = get_ip()
     if is_rate_limited(ip):
         return jsonify({"success": False, "error": "Rate limit exceeded. Please wait 30 seconds before submitting another booking proposal."}), 429
@@ -908,6 +926,10 @@ def api_create_reservation():
 @admin_required
 def api_get_reservations():
     """Retrieve reservations with filtering, search, sorting and pagination."""
+    supabase_error = require_supabase_reservations()
+    if supabase_error:
+        return supabase_error
+
     search = request.args.get('search', '').strip()
     status = request.args.get('status', '').strip()
     date_filter = request.args.get('date_filter', '').strip()
@@ -942,6 +964,8 @@ def api_get_reservations():
             if direct_data.get("total_items", 0) > 0:
                 data = direct_data
                 data["warning"] = "Loaded reservations through direct collection fallback."
+        data["success"] = True
+        data["database"] = "supabase" if db.use_supabase() else "sqlite"
     except Exception as exc:
         print(f"Reservation inbox fetch failed: {exc}")
         return jsonify({
@@ -955,6 +979,10 @@ def api_get_reservations():
 @admin_required
 def api_get_reservation_detail(res_id):
     """Retrieve detailed reservation. Marks the item as read automatically."""
+    supabase_error = require_supabase_reservations()
+    if supabase_error:
+        return supabase_error
+
     try:
         res = db.get_by_id("reservations", res_id)
     except Exception as exc:
@@ -983,6 +1011,10 @@ def api_get_reservation_detail(res_id):
 @admin_required
 def api_update_reservation(res_id):
     """Update reservation status or read-state, saving status log details."""
+    supabase_error = require_supabase_reservations()
+    if supabase_error:
+        return supabase_error
+
     try:
         res = db.get_by_id("reservations", res_id)
     except Exception as exc:
@@ -1035,6 +1067,10 @@ def api_update_reservation(res_id):
 @admin_required
 def api_delete_reservation(res_id):
     """Permanently delete a reservation from database."""
+    supabase_error = require_supabase_reservations()
+    if supabase_error:
+        return supabase_error
+
     try:
         res = db.get_by_id("reservations", res_id)
     except Exception as exc:
@@ -1061,6 +1097,10 @@ def api_delete_reservation(res_id):
 @admin_required
 def api_get_reservation_counters():
     """Retrieve live stats counters for the dashboard."""
+    supabase_error = require_supabase_reservations()
+    if supabase_error:
+        return supabase_error
+
     try:
         counts = db.get_reservation_counters()
     except Exception as exc:
@@ -1072,6 +1112,10 @@ def api_get_reservation_counters():
 @admin_required
 def api_get_recent_logs():
     """Retrieve the last 10 reservation activity logs across the entire system."""
+    supabase_error = require_supabase_reservations()
+    if supabase_error:
+        return supabase_error
+
     try:
         logs = db.get_recent_reservation_logs(10)
     except Exception as exc:
@@ -1084,6 +1128,10 @@ def api_get_recent_logs():
 @admin_required
 def api_get_reservation_logs(res_id):
     """Retrieve audit history logs trail."""
+    supabase_error = require_supabase_reservations()
+    if supabase_error:
+        return supabase_error
+
     try:
         logs = db.get_reservation_logs(res_id)
     except Exception as exc:
@@ -1095,6 +1143,10 @@ def api_get_reservation_logs(res_id):
 @admin_required
 def stream_reservations():
     """Server-Sent Events stream for real-time notification synchronization."""
+    supabase_error = require_supabase_reservations()
+    if supabase_error:
+        return supabase_error
+
     messages = announcer.listen()
     def event_stream():
         try:
